@@ -162,7 +162,7 @@ brushSize, brushColor, setBrushColor, brushOpacity, isEraser, setIsEraser, setBr
   const handleTogglePlayback = () => togglePlayback(canvasRef, tempCanvasRef, drawingElements, layers, viewTransform, redrawCanvas);
   const handleVideoExport = (duration) => handleExportVideo(duration, canvasRef, drawingElements, layers, viewTransform, bgColor, imageSrc2, opacity2, grayscale2);
   
-  const handleSave = () => {
+const handleSave = () => {
     if (!containerRef.current) return;
     const { width, height } = containerRef.current.getBoundingClientRect();
     const paneWidth = width / 2;
@@ -170,6 +170,8 @@ brushSize, brushColor, setBrushColor, brushOpacity, isEraser, setIsEraser, setBr
     exportCanvas.width = paneWidth;
     exportCanvas.height = height;
     const expCtx = exportCanvas.getContext('2d');
+    
+    // 1. Fill Background
     expCtx.fillStyle = bgColor;
     expCtx.fillRect(0, 0, paneWidth, height);
 
@@ -177,6 +179,7 @@ brushSize, brushColor, setBrushColor, brushOpacity, isEraser, setIsEraser, setBr
     img.crossOrigin = "anonymous"; 
     img.src = imageSrc2;
     img.onload = () => {
+        // 2. Draw Reference Image
         expCtx.save();
         if (grayscale2) expCtx.filter = 'grayscale(100%)';
         expCtx.globalAlpha = opacity2;
@@ -193,15 +196,46 @@ brushSize, brushColor, setBrushColor, brushOpacity, isEraser, setIsEraser, setBr
         expCtx.drawImage(img, offsetX, offsetY, drawW, drawH);
         expCtx.restore();
 
+        // 3. Draw Layers (Corrected with Temp Canvas)
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = paneWidth;
+        tempCanvas.height = height;
+        const tempCtx = tempCanvas.getContext('2d');
+
         expCtx.save();
         expCtx.beginPath(); expCtx.rect(0, 0, paneWidth, height); expCtx.clip();
-        expCtx.scale(scale, scale);
-        expCtx.translate(-(paneWidth + viewTransform.x), -viewTransform.y);
+        
+        // Remove the global transform on expCtx here. We apply it to tempCtx instead.
+        
         layers.forEach(layer => {
             if (!layer.visible) return;
             const layerEls = drawingElements.filter(el => el.layerId === layer.id || (!el.layerId && layer.id === 'layer1'));
-            layerEls.forEach(el => drawElement(expCtx, el));
+            
+            // Clear temp canvas for the new layer
+            tempCtx.clearRect(0, 0, paneWidth, height);
+            
+            // Apply View Transform to Temp Context
+            tempCtx.save();
+            tempCtx.scale(scale, scale);
+            tempCtx.translate(-(paneWidth + viewTransform.x), -viewTransform.y);
+
+            // Draw elements to temp canvas (Eraser will only affect this layer)
+            layerEls.forEach(el => drawElement(tempCtx, el));
+            
+            tempCtx.restore();
+
+            // Composite Temp Canvas onto Export Canvas
+            expCtx.save();
+            expCtx.globalAlpha = layer.opacity;
+            expCtx.drawImage(tempCanvas, 0, 0);
+            expCtx.restore();
         });
+
+        // 4. Draw Units (Apply transform to expCtx for this part)
+        expCtx.save();
+        expCtx.scale(scale, scale);
+        expCtx.translate(-(paneWidth + viewTransform.x), -viewTransform.y);
+
         unitTypes.forEach(type => {
           if (!type.visible || !type.base) return;
           expCtx.save(); expCtx.globalAlpha = type.opacity;
@@ -216,14 +250,17 @@ brushSize, brushColor, setBrushColor, brushOpacity, isEraser, setIsEraser, setBr
               expCtx.restore();
           }
         });
-        expCtx.restore();
+        
+        expCtx.restore(); // Restore transform
+        expCtx.restore(); // Restore clip
+        
         const link = document.createElement('a');
         link.download = 'portrait-study.png';
         link.href = exportCanvas.toDataURL();
         link.click();
     };
   };
-
+  
   const handleImageUpload1 = (e) => { const file = e.target.files[0]; if (file) { const reader = new FileReader(); reader.onload = (ev) => setImageSrc1(ev.target.result); reader.readAsDataURL(file); } };
   const handleImageUpload2 = (e) => { const file = e.target.files[0]; if (file) { const reader = new FileReader(); reader.onload = (ev) => setImageSrc2(ev.target.result); reader.readAsDataURL(file); } };
 
