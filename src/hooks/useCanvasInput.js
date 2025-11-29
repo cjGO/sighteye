@@ -32,7 +32,8 @@ export const useCanvasInput = ({
     isCreatingUnit, setIsCreatingUnit,
     tempUnitStart, setTempUnitStart,
     setMousePos, mousePosRef,
-    setZoomSelectionStart
+    setZoomSelectionStart,
+    zoomSelectionStart
 }) => {
 
   const [transformHandle, setTransformHandle] = useState(null);
@@ -41,6 +42,11 @@ export const useCanvasInput = ({
   
   // Ref for pressure smoothing to avoid jittery line thickness
   const lastPressureRef = useRef(0.5);
+
+  // --- Multi-touch / Gesture State ---
+  const evCache = useRef([]);
+  const prevPinchDist = useRef(-1);
+  const prevPinchCenter = useRef(null);
 
   const getSelectionVisuals = () => {
       if (activeSelectionBounds && activeSelectionBounds.type === 'box') {
@@ -75,6 +81,24 @@ export const useCanvasInput = ({
   // --- Pointer Down ---
   const handlePointerDown = (e) => {
     e.target.setPointerCapture(e.pointerId);
+    
+    // Add to cache for multi-touch
+    evCache.current.push(e);
+
+    // If 2 pointers, clear single-pointer actions and prep for pinch
+    if (evCache.current.length === 2) {
+        setDragStartPos(null);
+        setLineStartPoint(null);
+        setCurrentPoints([]);
+        setZoomSelectionStart(null);
+        setTempUnitStart(null);
+        setIsCreatingUnit(false);
+        return;
+    }
+    
+    // If more than 2, ignore (or handle 3+ finger gestures later)
+    if (evCache.current.length > 2) return;
+
     const rect = containerRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
@@ -191,6 +215,67 @@ export const useCanvasInput = ({
     mousePosRef.current = { x, y }; 
     const worldPos = toWorld(x, y);
 
+    // Update Event Cache
+    const index = evCache.current.findIndex(ev => ev.pointerId === e.pointerId);
+    if (index !== -1) evCache.current[index] = e;
+
+    // --- PINCH ZOOM & PAN LOGIC ---
+    if (evCache.current.length === 2) {
+        const p1 = evCache.current[0];
+        const p2 = evCache.current[1];
+        
+        // Calculate current distance between points
+        const curDist = Math.hypot(p1.clientX - p2.clientX, p1.clientY - p2.clientY);
+        
+        // Calculate center of pinch (in container coords)
+        const cx = ((p1.clientX + p2.clientX) / 2) - rect.left;
+        const cy = ((p1.clientY + p2.clientY) / 2) - rect.top;
+
+        if (prevPinchDist.current > 0 && prevPinchCenter.current) {
+            const distDelta = curDist / prevPinchDist.current;
+            
+            // IMPORTANT: Capture these values LOCALLY. 
+            // The ref (prevPinchCenter.current) might be nulled out by handlePointerUp
+            // before the React state update function runs below.
+            const lastCenter = prevPinchCenter.current;
+
+            // Apply Transform
+            setViewTransform(prev => {
+                const newScale = Math.max(0.1, Math.min(10, prev.scale * distDelta));
+
+                // Helper to get local coordinate relative to correct pane
+                const getLocalX = (screenX) => {
+                   const halfWidth = rect.width / 2;
+                   const isRight = screenX > halfWidth;
+                   return screenX - (isRight ? halfWidth : 0);
+                };
+
+                // Use captured local variable 'lastCenter', NOT the ref
+                const oldLocalX = getLocalX(lastCenter.x);
+                const oldLocalY = lastCenter.y;
+                
+                const newLocalX = getLocalX(cx);
+                const newLocalY = cy;
+
+                // Formula: NewOffset = OldOffset + (OldLocal / OldScale) - (NewLocal / NewScale)
+                // This preserves the World Point under the pinch center
+                const newTx = prev.x + (oldLocalX / prev.scale) - (newLocalX / newScale);
+                const newTy = prev.y + (oldLocalY / prev.scale) - (newLocalY / newScale);
+                
+                return { scale: newScale, x: newTx, y: newTy };
+            });
+        }
+
+        prevPinchDist.current = curDist;
+        prevPinchCenter.current = { x: cx, y: cy };
+        
+        // Cancel any drawing or single-finger drag that might have started
+        if (currentPoints.length > 0) setCurrentPoints([]);
+        if (dragStartPos) setDragStartPos(null);
+        return;
+    }
+    // --- END PINCH LOGIC ---
+
     if (isAdjustingBrush && lastAdjustPos.current) {
         const dx = x - lastAdjustPos.current.x;
         const dy = y - lastAdjustPos.current.y;
@@ -265,7 +350,7 @@ export const useCanvasInput = ({
     else if (mode.startsWith('select') && e.buttons === 1) {
         setSelectionPath(prev => [...prev, { x: worldPos.x, y: worldPos.y }]);
     }
-    else if (mode === 'draw' && e.buttons === 1) {
+    else if (mode === 'draw' && e.buttons === 1 && evCache.current.length === 1) {
       // Coalesce events for higher precision (iPad/Wacom)
       const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
       const newPoints = [];
@@ -274,17 +359,14 @@ export const useCanvasInput = ({
          const rect = containerRef.current.getBoundingClientRect();
          const wp = toWorld(evt.clientX - rect.left, evt.clientY - rect.top);
          
-         // 1. Min Distance Filter (0.5px) to remove redundant stacked points
          const lastP = newPoints.length > 0 
              ? newPoints[newPoints.length - 1] 
              : (currentPoints.length > 0 ? currentPoints[currentPoints.length - 1] : null);
          
          if (lastP && Math.hypot(wp.x - lastP.x, wp.y - lastP.y) < 0.5) return; 
 
-         // 2. Pressure Smoothing (Low-pass filter)
          let p = evt.pointerType === 'pen' ? evt.pressure : 0.5;
          if (evt.pointerType === 'pen') {
-             // 80% old pressure, 20% new pressure to smooth out jitter
              p = lastPressureRef.current * 0.8 + p * 0.2;
              lastPressureRef.current = p;
          }
@@ -359,8 +441,25 @@ export const useCanvasInput = ({
 
   // --- Pointer Up ---
   const handlePointerUp = (e) => {
-    e.target.releasePointerCapture(e.pointerId);
+    // Safely release pointer capture
+    try {
+        if (e.target.hasPointerCapture && e.target.hasPointerCapture(e.pointerId)) {
+            e.target.releasePointerCapture(e.pointerId);
+        }
+    } catch(err) {
+        // Ignore errors if pointer was already released by the browser/system
+    }
     
+    // Remove from cache
+    const index = evCache.current.findIndex(ev => ev.pointerId === e.pointerId);
+    if (index !== -1) evCache.current.splice(index, 1);
+    
+    // Reset pinch state if fewer than 2 fingers
+    if (evCache.current.length < 2) {
+        prevPinchDist.current = -1;
+        prevPinchCenter.current = null;
+    }
+
     if (isAdjustingBrush) { setIsAdjustingBrush(false); return; }
     if (transformHandle) { setTransformHandle(null); setDragStartPos(null); return; }
 

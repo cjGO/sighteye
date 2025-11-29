@@ -42,10 +42,11 @@ const PortraitContent = () => {
   const ctx = usePortrait();
   const { 
     mode, setMode, switchMode, 
-brushSize, brushColor, setBrushColor, brushOpacity, isEraser, setIsEraser, setBrushOpacity, setBrushSize,
+    brushSize, brushColor, setBrushColor, brushOpacity, isEraser, setIsEraser, setBrushOpacity, setBrushSize,
     usePressure, setUsePressure,
     layers, activeLayerId, drawingElements, setDrawingElements, 
-    measurements, setMeasurements, addMeasurement, restoreHistory,    selectedElementIds, setSelectedElementIds, selectionPath, setSelectionPath, activeSelectionBounds, setActiveSelectionBounds,
+    measurements, setMeasurements, addMeasurement, restoreHistory,    
+    selectedElementIds, setSelectedElementIds, selectionPath, setSelectionPath, activeSelectionBounds, setActiveSelectionBounds,
     dragStartPos, setDragStartPos, draggingItem, setDraggingItem,
     isAdjustingBrush, setIsAdjustingBrush,
     lineStartPoint, setLineStartPoint, isShiftDown, setIsShiftDown,
@@ -209,7 +210,7 @@ const handleSave = () => {
         
         layers.forEach(layer => {
             if (!layer.visible) return;
-            const layerEls = drawingElements.filter(el => el.layerId === layer.id || (!el.layerId && layer.id === 'layer1'));
+            const layerEls = drawingElements.filter(el => el.layerId === layer.id || (!el.layerId && layer.id === 'layer1')); 
             
             // Clear temp canvas for the new layer
             tempCtx.clearRect(0, 0, paneWidth, height);
@@ -410,7 +411,7 @@ const handleSave = () => {
                  {imageSrc2 ? (<img src={imageSrc2} alt="Ref 2" style={{ ...getImageStyle(true), opacity: opacity2, filter: grayscale2 ? 'grayscale(100%)' : 'none' }} />) : (<div className="w-full h-full flex items-center justify-center text-slate-600 text-sm flex-col"><ImagePlus size={32} className="mb-2 opacity-50"/><span>No Image</span></div>)}
               </div>
               <canvas ref={canvasRef} className="absolute top-0 left-0 w-full h-full touch-none pointer-events-none" style={{ zIndex: 10 }} />
-              <canvas ref={overlayRef} className="absolute top-0 left-0 w-full h-full touch-none" style={{ zIndex: 20, cursor: mode === 'move' ? 'move' : mode === 'grab' ? (dragStartPos ? 'grabbing' : 'grab') : mode.startsWith('select') ? 'crosshair' : mode === 'zoom' ? 'zoom-in' : mode === 'draw' || mode === 'line' ? 'crosshair' : 'default' }} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} />
+              <canvas ref={overlayRef} className="absolute top-0 left-0 w-full h-full touch-none" style={{ zIndex: 20, cursor: mode === 'move' ? 'move' : mode === 'grab' ? (dragStartPos ? 'grabbing' : 'grab') : mode.startsWith('select') ? 'crosshair' : mode === 'zoom' ? 'zoom-in' : mode === 'draw' || mode === 'line' ? 'crosshair' : 'default' }} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp} onPointerOut={handlePointerUp} />
               
               {activeSidePanel === 'palette' && (<ColorPalette onPickCustomBrushColor={() => brushColorInputRef.current.click()} onPickCustomBgColor={() => bgColorInputRef.current.click()} />)}
               {activeSidePanel === 'layers' && (<LayerPanel />)}
