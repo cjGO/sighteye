@@ -4,7 +4,6 @@ import {
   getDistanceToLineSegment, 
   isPointInRect, 
   isPointInPolygon, 
-  getElementsBounds,
   rotatePoint,
   scalePoint
 } from '../utils/geometry';
@@ -39,11 +38,12 @@ export const useCanvasInput = ({
   const [transformHandle, setTransformHandle] = useState(null);
   const [selectionBounds, setSelectionBounds] = useState(null);
   const selectionBoundsSnapshotRef = useRef(null);
+  
+  // Ref for pressure smoothing to avoid jittery line thickness
+  const lastPressureRef = useRef(0.5);
 
-  // Helper to extract visual points for handle detection
   const getSelectionVisuals = () => {
       if (activeSelectionBounds && activeSelectionBounds.type === 'box') {
-          // If we only have 2 points (un-rotated creation), convert to 4 for consistency
           if (activeSelectionBounds.path.length === 2) {
               const p1 = activeSelectionBounds.path[0];
               const p2 = activeSelectionBounds.path[1];
@@ -87,15 +87,13 @@ export const useCanvasInput = ({
         return;
     }
 
-    // Transform Handles
     if (selectedElementIds.size > 0 && activeSelectionBounds) {
         const corners = getSelectionVisuals();
         
         if (corners && Array.isArray(corners)) {
-            setSelectionBounds(corners); // Cache current state
+            setSelectionBounds(corners); 
             const handleSize = 10 / viewTransform.scale;
             
-            // Rotate Handle (Top Mid projected)
             const topMidX = (corners[0].x + corners[1].x) / 2;
             const topMidY = (corners[0].y + corners[1].y) / 2;
             const dx = corners[1].x - corners[0].x;
@@ -130,14 +128,11 @@ export const useCanvasInput = ({
     if (mode === 'zoom') { if (x < rect.width / 2) setZoomSelectionStart({ x, y }); }
     else if (mode === 'grab') { setDragStartPos({ x, y }); }
     
-    // Select Tool Hit Testing
     else if (mode.startsWith('select')) {
         if (selectedElementIds.size > 0 && activeSelectionBounds) {
             let isInside = false;
-            // Robust Hit Test for Polygon
             let poly = activeSelectionBounds.path;
             if (activeSelectionBounds.type === 'box' && poly.length === 2) {
-                // Convert 2-point box to polygon for consistent hit test
                 poly = [{x: poly[0].x, y: poly[0].y}, {x: poly[1].x, y: poly[0].y}, {x: poly[1].x, y: poly[1].y}, {x: poly[0].x, y: poly[1].y}];
             }
             isInside = isPointInPolygon(worldPos, poly);
@@ -151,19 +146,18 @@ export const useCanvasInput = ({
                 return;
             }
         }
-        // Start New Selection
         setActiveSelectionBounds(null);
         setSelectedElementIds(new Set());
         setSelectionPath([{ x: worldPos.x, y: worldPos.y }]);
     }
     
     else if (mode === 'draw') {
-      const pressure = e.pointerType === 'pen' ? e.pressure : 1; 
+      const pressure = e.pointerType === 'pen' ? e.pressure : 0.5; // Default mouse to 0.5
+      lastPressureRef.current = pressure;
       setCurrentPoints([{ x: worldPos.x, y: worldPos.y, pressure, pointerType: e.pointerType }]);
     } 
     else if (mode === 'line') { setLineStartPoint(lineStartPoint ? null : { x: worldPos.x, y: worldPos.y }); }
     else if (mode === 'move') {
-        // Move Picking Logic
         if (selectedElementIds.size > 0) {
              setDraggingItem({ type: 'selection' });
              setDragStartPos({ x, y });
@@ -177,7 +171,7 @@ export const useCanvasInput = ({
              drawingSnapshotRef.current = JSON.parse(JSON.stringify(drawingElements));
         }
     }
-    else if (mode === 'measure') { /* ... measure logic ... */
+    else if (mode === 'measure') { 
       const activeUnit = unitTypes.find(u => u.id === activeUnitId);
       if (activeUnit && !activeUnit.base) {
         setIsCreatingUnit(true);
@@ -206,13 +200,11 @@ export const useCanvasInput = ({
         return; 
     }
 
-    // --- TRANSFORM LOGIC ---
     if (transformHandle && dragStartPos) {
         const snapshot = drawingSnapshotRef.current;
         const selectionSnapshot = selectionBoundsSnapshotRef.current;
         
         let boundsPath = selectionSnapshot.path;
-        // Normalize 2-point box to 4 corners
         if (selectionSnapshot.type === 'box' && boundsPath.length === 2) {
              boundsPath = [
                  {x: boundsPath[0].x, y: boundsPath[0].y},
@@ -222,7 +214,6 @@ export const useCanvasInput = ({
              ];
         }
 
-        // Center for rotation
         const cx = (boundsPath[0].x + boundsPath[2].x) / 2;
         const cy = (boundsPath[0].y + boundsPath[2].y) / 2;
 
@@ -243,12 +234,10 @@ export const useCanvasInput = ({
             transformedSelectionPath = boundsPath.map(p => rotatePoint(p, {x: cx, y: cy}, angleDiff));
 
         } else {
-            // SCALING
             const anchorMap = { 'tl': 2, 'tr': 3, 'br': 0, 'bl': 1 }; 
             const anchorIdx = anchorMap[transformHandle];
             const anchor = boundsPath[anchorIdx]; 
             
-            // Uniform scaling based on distance ratio
             const startDist = Math.hypot(dragStartPos.x - anchor.x, dragStartPos.y - anchor.y);
             const currDist = Math.hypot(worldPos.x - anchor.x, worldPos.y - anchor.y);
             let scale = currDist / (startDist || 1);
@@ -277,13 +266,35 @@ export const useCanvasInput = ({
         setSelectionPath(prev => [...prev, { x: worldPos.x, y: worldPos.y }]);
     }
     else if (mode === 'draw' && e.buttons === 1) {
+      // Coalesce events for higher precision (iPad/Wacom)
       const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-      const newPoints = events.map(evt => {
+      const newPoints = [];
+
+      events.forEach(evt => {
          const rect = containerRef.current.getBoundingClientRect();
          const wp = toWorld(evt.clientX - rect.left, evt.clientY - rect.top);
-         return { x: wp.x, y: wp.y, pressure: evt.pointerType === 'pen' ? evt.pressure : 1 };
+         
+         // 1. Min Distance Filter (0.5px) to remove redundant stacked points
+         const lastP = newPoints.length > 0 
+             ? newPoints[newPoints.length - 1] 
+             : (currentPoints.length > 0 ? currentPoints[currentPoints.length - 1] : null);
+         
+         if (lastP && Math.hypot(wp.x - lastP.x, wp.y - lastP.y) < 0.5) return; 
+
+         // 2. Pressure Smoothing (Low-pass filter)
+         let p = evt.pointerType === 'pen' ? evt.pressure : 0.5;
+         if (evt.pointerType === 'pen') {
+             // 80% old pressure, 20% new pressure to smooth out jitter
+             p = lastPressureRef.current * 0.8 + p * 0.2;
+             lastPressureRef.current = p;
+         }
+
+         newPoints.push({ x: wp.x, y: wp.y, pressure: p, pointerType: evt.pointerType });
       });
-      setCurrentPoints(prev => [...prev, ...newPoints]);
+
+      if (newPoints.length > 0) {
+         setCurrentPoints(prev => [...prev, ...newPoints]);
+      }
       
       if (isEraser) {
           const hitThreshold = Math.max(10, brushSize);
@@ -307,7 +318,6 @@ export const useCanvasInput = ({
       const snapshot = drawingSnapshotRef.current;
       
       if (draggingItem.type === 'selection') {
-          // Move Elements
           const movedElements = snapshot.map(el => {
               if (selectedElementIds.has(el.id)) {
                   if (el.type === 'stroke') return { ...el, points: el.points.map(p => ({ ...p, x: p.x + dx, y: p.y + dy })) };
@@ -317,11 +327,9 @@ export const useCanvasInput = ({
           });
           setDrawingElements(movedElements);
 
-          // Move Selection Box (Consistent State)
           if (selectionBoundsSnapshotRef.current) {
               const snap = selectionBoundsSnapshotRef.current;
               let paths = snap.path;
-              // Normalize box to 4 corners if needed
               if (snap.type === 'box' && paths.length === 2) {
                   paths = [{x: paths[0].x, y: paths[0].y}, {x: paths[1].x, y: paths[0].y}, {x: paths[1].x, y: paths[1].y}, {x: paths[0].x, y: paths[1].y}];
               }
@@ -359,12 +367,10 @@ export const useCanvasInput = ({
     if (mode === 'zoom' && zoomSelectionStart) { setZoomSelectionStart(null); }
     else if (mode === 'grab') { setDragStartPos(null); }
     
-    // --- SELECTION & SPLITTING LOGIC ---
     else if (mode.startsWith('select')) {
         const newDrawingElements = [];
         const newSelectionIds = new Set();
         
-        // Define Hit Test Function
         let isInsideFn;
         let newBounds = null;
 
@@ -372,7 +378,6 @@ export const useCanvasInput = ({
             const start = selectionPath[0];
             const end = selectionPath[selectionPath.length - 1];
             isInsideFn = (p) => isPointInRect(p, start, end);
-            // Save as 4 corners for rotation later
             newBounds = { 
                 type: 'box', 
                 path: [{x: start.x, y: start.y}, {x: end.x, y: start.y}, {x: end.x, y: end.y}, {x: start.x, y: end.y}] 
@@ -390,7 +395,6 @@ export const useCanvasInput = ({
                 }
 
                 if (el.type === 'stroke' && el.points.length > 1) {
-                    // --- SPLITTING ---
                     const segments = [];
                     let currentSegment = [];
                     let currentInside = isInsideFn(el.points[0]);
@@ -401,7 +405,7 @@ export const useCanvasInput = ({
                         const isPInside = isInsideFn(p);
                         if (isPInside === currentInside) { currentSegment.push(p); } 
                         else {
-                            currentSegment.push(p); // Duplicate connection point
+                            currentSegment.push(p);
                             segments.push({ points: currentSegment, inside: currentInside });
                             currentSegment = [p];
                             currentInside = isPInside;
@@ -417,7 +421,6 @@ export const useCanvasInput = ({
                     });
                 } 
                 else if (el.type === 'line') {
-                    // Convert line to points to allow splitting
                     const dist = Math.hypot(el.end.x - el.start.x, el.end.y - el.start.y);
                     const steps = Math.ceil(dist / 2);
                     const linePoints = [];
@@ -425,7 +428,6 @@ export const useCanvasInput = ({
                         const t = steps===0?0:i/steps;
                         linePoints.push({ x: el.start.x + (el.end.x-el.start.x)*t, y: el.start.y + (el.end.y-el.start.y)*t, pressure:1 });
                     }
-                    // Run same splitting loop
                     const segments = [];
                     let currentSegment = [];
                     let currentInside = isInsideFn(linePoints[0]);
@@ -459,7 +461,6 @@ export const useCanvasInput = ({
         }
         setSelectionPath([]);
     }
-    // -----------------------------------------------------------
 
     else if (mode === 'draw' && currentPoints.length > 0) {
       const newStroke = { id: Date.now(), type: 'stroke', layerId: activeLayerId, points: currentPoints, color: brushColor, size: brushSize, opacity: brushOpacity, isEraser: isEraser };
@@ -481,19 +482,16 @@ export const useCanvasInput = ({
       drawingSnapshotRef.current = null;
       selectionBoundsSnapshotRef.current = null;
     }
-else if (mode === 'measure' && isCreatingUnit) {
-      // 1. Calculate where the mouse was released
+    else if (mode === 'measure' && isCreatingUnit) {
       const rect = containerRef.current.getBoundingClientRect();
       const worldPos = toWorld(e.clientX - rect.left, e.clientY - rect.top);
       
-      // 2. If we have a start point, save the base to the active unit
       if (tempUnitStart) {
           const dx = worldPos.x - tempUnitStart.x;
           const dy = worldPos.y - tempUnitStart.y;
           const length = Math.hypot(dx, dy);
           const angle = Math.atan2(dy, dx);
 
-          // Only save if the length is significant (prevents accidental clicks)
           if (length > 0) {
               setUnitTypes(prev => prev.map(u => {
                   if (u.id === activeUnitId) {
@@ -507,7 +505,6 @@ else if (mode === 'measure' && isCreatingUnit) {
                               length: length,
                               angle: angle
                           },
-                          // Set the active angle to the drawn angle initially
                           activeAngle: angle 
                       };
                   }
@@ -516,7 +513,6 @@ else if (mode === 'measure' && isCreatingUnit) {
           }
       }
 
-      // 3. Reset flags
       setIsCreatingUnit(false);
       setTempUnitStart(null);
     }
