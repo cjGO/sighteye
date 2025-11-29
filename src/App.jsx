@@ -117,15 +117,41 @@ const PortraitContent = () => {
 
     canvasCtx.clearRect(0, 0, width, height);
 
-    const renderLayers = (targetCtx) => {
+    const renderPane = (isRight) => {
+        const vx = viewTransform.x;
+        const vy = viewTransform.y;
+        const s = viewTransform.scale;
+        
+        // Calculate Transform Matrix [a, b, c, d, e, f] for setTransform
+        // This ensures the tempCtx renders vector elements at the correct screen resolution and position
+        // Left: x_screen = (x_world - vx) * s  =>  s*x_world + (-s*vx)
+        // Right: x_screen = s*(x_world - (hw + vx)) + hw  =>  s*x_world + (hw - s*hw - s*vx)
+        
+        let a = s, b = 0, c = 0, d = s;
+        let e_x = isRight ? (halfWidth - s * (halfWidth + vx)) : (-vx * s);
+        let f_y = -vy * s;
+
+        canvasCtx.save();
+        canvasCtx.beginPath();
+        if (isRight) canvasCtx.rect(halfWidth, 0, halfWidth, height);
+        else canvasCtx.rect(0, 0, halfWidth, height);
+        canvasCtx.clip();
+
         layers.forEach(layer => {
             if (!layer.visible) return;
             const layerElements = drawingElements.filter(el => el.layerId === layer.id || (!el.layerId && layer.id === 'layer1')); 
             
             if (layerElements.length === 0 && layer.id !== activeLayerId) return;
 
-            if (tempCtx) tempCtx.clearRect(0, 0, width, height);
+            if (tempCtx) {
+                // 1. Reset Temp Context
+                tempCtx.setTransform(1, 0, 0, 1, 0, 0);
+                tempCtx.clearRect(0, 0, width, height);
+                // 2. Apply View Transform to Temp Context
+                tempCtx.setTransform(a, b, c, d, e_x, f_y);
+            }
             
+            // 3. Draw Elements (in World Coords, projected by setTransform)
             layerElements.forEach(el => { if (tempCtx) drawElement(tempCtx, el); });
 
             if (layer.id === activeLayerId && mode === 'draw' && currentPoints.length > 0) {
@@ -133,28 +159,16 @@ const PortraitContent = () => {
             }
 
             if (tempCtx) {
-                targetCtx.save();
-                targetCtx.globalAlpha = layer.opacity;
-                targetCtx.drawImage(tempCanvasRef.current, 0, 0);
-                targetCtx.restore();
+                // 4. Draw the rendered pixels to screen (Identity transform on destination, as temp is already projected)
+                canvasCtx.globalAlpha = layer.opacity;
+                canvasCtx.drawImage(tempCanvasRef.current, 0, 0);
             }
         });
+        canvasCtx.restore();
     };
 
-    canvasCtx.save();
-    canvasCtx.beginPath(); canvasCtx.rect(0, 0, halfWidth, height); canvasCtx.clip(); 
-    canvasCtx.translate(-viewTransform.x * viewTransform.scale, -viewTransform.y * viewTransform.scale);
-    canvasCtx.scale(viewTransform.scale, viewTransform.scale);
-    renderLayers(canvasCtx);
-    canvasCtx.restore();
-
-    canvasCtx.save();
-    canvasCtx.beginPath(); canvasCtx.rect(halfWidth, 0, halfWidth, height); canvasCtx.clip(); 
-    canvasCtx.translate(halfWidth, 0);
-    canvasCtx.scale(viewTransform.scale, viewTransform.scale);
-    canvasCtx.translate(-(halfWidth + viewTransform.x), -viewTransform.y);
-    renderLayers(canvasCtx);
-    canvasCtx.restore();
+    renderPane(false); // Left
+    renderPane(true);  // Right
   };
 
   const { isPlaying, isRecording, recordingProgress, videoFormat, setVideoFormat, showVideoMenu, setShowVideoMenu, togglePlayback, handleExportVideo } = useRecorder();
@@ -197,7 +211,7 @@ const handleSave = () => {
         expCtx.drawImage(img, offsetX, offsetY, drawW, drawH);
         expCtx.restore();
 
-        // 3. Draw Layers (Corrected with Temp Canvas)
+        // 3. Draw Layers
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = paneWidth;
         tempCanvas.height = height;
@@ -206,33 +220,26 @@ const handleSave = () => {
         expCtx.save();
         expCtx.beginPath(); expCtx.rect(0, 0, paneWidth, height); expCtx.clip();
         
-        // Remove the global transform on expCtx here. We apply it to tempCtx instead.
-        
         layers.forEach(layer => {
             if (!layer.visible) return;
-            const layerEls = drawingElements.filter(el => el.layerId === layer.id || (!el.layerId && layer.id === 'layer1')); 
+            const layerEls = drawingElements.filter(el => el.layerId === layer.id || (!el.layerId && layer.id === 'layer1'));
             
-            // Clear temp canvas for the new layer
+            // Clear and Transform Temp Canvas
+            tempCtx.setTransform(1, 0, 0, 1, 0, 0);
             tempCtx.clearRect(0, 0, paneWidth, height);
-            
-            // Apply View Transform to Temp Context
-            tempCtx.save();
-            tempCtx.scale(scale, scale);
-            tempCtx.translate(-(paneWidth + viewTransform.x), -viewTransform.y);
+            tempCtx.setTransform(scale, 0, 0, scale, targetX, targetY); // Apply view transform
 
-            // Draw elements to temp canvas (Eraser will only affect this layer)
+            // Draw elements
             layerEls.forEach(el => drawElement(tempCtx, el));
             
-            tempCtx.restore();
-
-            // Composite Temp Canvas onto Export Canvas
+            // Composite
             expCtx.save();
             expCtx.globalAlpha = layer.opacity;
             expCtx.drawImage(tempCanvas, 0, 0);
             expCtx.restore();
         });
 
-        // 4. Draw Units (Apply transform to expCtx for this part)
+        // 4. Draw Units (Directly to export context with transform)
         expCtx.save();
         expCtx.scale(scale, scale);
         expCtx.translate(-(paneWidth + viewTransform.x), -viewTransform.y);
