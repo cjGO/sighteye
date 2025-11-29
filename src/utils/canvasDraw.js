@@ -135,22 +135,49 @@ export const drawVariableWidthPath = (ctx, points, baseSize, baseColor, opacity,
     ctx.lineTo(leftPts[i].x, leftPts[i].y);
   }
   
-  // End Cap (Round)
-  const lastP = drawPoints[drawPoints.length - 1];
+  // End Cap (Semi-Circle)
+  // Connects the end of the left edge to the start of the right edge (in reverse)
+  const lastI = drawPoints.length - 1;
+  const lastP = drawPoints[lastI];
   const lastPressure = enablePressure ? (lastP.pressure ?? 0.5) : 1.0;
   const lastR = (baseSize * Math.max(0.1, lastPressure)) / 2;
-  ctx.arc(lastP.x, lastP.y, lastR, 0, Math.PI * 2);
+  
+  // Recompute normal angle for the last segment to draw the cap correctly
+  const prevP = drawPoints[lastI - 1];
+  const dxE = lastP.x - prevP.x;
+  const dyE = lastP.y - prevP.y;
+  const lenE = Math.hypot(dxE, dyE) || 1;
+  const nxE = -dyE / lenE;
+  const nyE = dxE / lenE;
+  const endNormalAngle = Math.atan2(nyE, nxE);
+
+  // Draw arc from Normal Angle (Left) to Normal Angle + PI (Right)
+  // 'true' for anticlockwise ensures we go around the tip
+  ctx.arc(lastP.x, lastP.y, lastR, endNormalAngle, endNormalAngle + Math.PI, true);
 
   // Right edge (reverse order)
   for (let i = rightPts.length - 1; i >= 0; i--) {
     ctx.lineTo(rightPts[i].x, rightPts[i].y);
   }
   
-  // Start Cap (Round)
+  // Start Cap (Semi-Circle)
+  // Connects the end of the right edge to the start of the left edge
   const firstP = drawPoints[0];
+  const nextP = drawPoints[1];
   const firstPressure = enablePressure ? (firstP.pressure ?? 0.5) : 1.0;
   const firstR = (baseSize * Math.max(0.1, firstPressure)) / 2;
-  ctx.arc(firstP.x, firstP.y, firstR, 0, Math.PI * 2);
+
+  // Recompute normal angle for the first segment
+  const dxS = nextP.x - firstP.x;
+  const dyS = nextP.y - firstP.y;
+  const lenS = Math.hypot(dxS, dyS) || 1;
+  const nxS = -dyS / lenS;
+  const nyS = dxS / lenS;
+  const startNormalAngle = Math.atan2(nyS, nxS);
+
+  // Draw arc from Right (Angle + PI) to Left (Angle)
+  // 'true' for anticlockwise ensures we go around the back
+  ctx.arc(firstP.x, firstP.y, firstR, startNormalAngle + Math.PI, startNormalAngle, true);
   
   ctx.closePath();
   ctx.fill();
