@@ -40,10 +40,17 @@ export const useCanvasInput = ({
   const [selectionBounds, setSelectionBounds] = useState(null);
   const selectionBoundsSnapshotRef = useRef(null);
   
-  // Ref for pressure smoothing to avoid jittery line thickness
+  // Synchronously track points to ensure fast taps are never lost
+  const activeStrokePoints = useRef([]); 
+  
+  // Track if Pen is active for strict Palm Rejection / Priority
+  const isPenActive = useRef(false);
+
+  // Ref for pressure smoothing
   const lastPressureRef = useRef(0.5);
 
   // --- Multi-touch / Gesture State ---
+  // Only track 'touch' events here for gestures
   const evCache = useRef([]);
   const prevPinchDist = useRef(-1);
   const prevPinchCenter = useRef(null);
@@ -82,28 +89,42 @@ export const useCanvasInput = ({
   const handlePointerDown = (e) => {
     e.target.setPointerCapture(e.pointerId);
     
-    // Add to cache for multi-touch
-    evCache.current.push(e);
+    // 1. Manage Gesture Cache (Only Touch)
+    if (e.pointerType === 'touch') {
+        evCache.current.push(e);
+    }
 
-    // If 2 pointers, clear single-pointer actions and prep for pinch
-    if (evCache.current.length === 2) {
+    // 2. Detect Pen Priority
+    if (e.pointerType === 'pen') {
+        isPenActive.current = true;
+        // If pen lands, immediately clear any previous ambiguous state
+        setDragStartPos(null);
+        setLineStartPoint(null);
+        activeStrokePoints.current = [];
+        setCurrentPoints([]);
+    }
+
+    // 3. Pinch Zoom Detection (Only if Pen is NOT active)
+    if (!isPenActive.current && evCache.current.length === 2) {
         setDragStartPos(null);
         setLineStartPoint(null);
         setCurrentPoints([]);
+        activeStrokePoints.current = []; 
         setZoomSelectionStart(null);
         setTempUnitStart(null);
         setIsCreatingUnit(false);
         return;
     }
     
-    // If more than 2, ignore (or handle 3+ finger gestures later)
-    if (evCache.current.length > 2) return;
+    // Ignore multi-touch if more than 2 or if Pen is active
+    if (!isPenActive.current && evCache.current.length > 2) return;
 
     const rect = containerRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     const worldPos = toWorld(x, y);
 
+    // Right click / Pen Button
     if (e.buttons === 2 && (mode === 'draw' || isEraser)) {
         setIsAdjustingBrush(true);
         lastAdjustPos.current = { x, y };
@@ -111,6 +132,7 @@ export const useCanvasInput = ({
         return;
     }
 
+    // Standard Tools
     if (selectedElementIds.size > 0 && activeSelectionBounds) {
         const corners = getSelectionVisuals();
         
@@ -176,9 +198,16 @@ export const useCanvasInput = ({
     }
     
     else if (mode === 'draw') {
-      const pressure = e.pointerType === 'pen' ? e.pressure : 0.5; // Default mouse to 0.5
+      // PALM REJECTION: If pen is active, ignore touch events
+      if (isPenActive.current && e.pointerType !== 'pen') return;
+
+      const pressure = e.pointerType === 'pen' ? e.pressure : 0.5;
       lastPressureRef.current = pressure;
-      setCurrentPoints([{ x: worldPos.x, y: worldPos.y, pressure, pointerType: e.pointerType }]);
+      const startPoint = { x: worldPos.x, y: worldPos.y, pressure, pointerType: e.pointerType };
+      
+      // LITERAL MARKING: Add point immediately to ref and state
+      activeStrokePoints.current = [startPoint];
+      setCurrentPoints([startPoint]);
     } 
     else if (mode === 'line') { setLineStartPoint(lineStartPoint ? null : { x: worldPos.x, y: worldPos.y }); }
     else if (mode === 'move') {
@@ -215,62 +244,49 @@ export const useCanvasInput = ({
     mousePosRef.current = { x, y }; 
     const worldPos = toWorld(x, y);
 
-    // Update Event Cache
-    const index = evCache.current.findIndex(ev => ev.pointerId === e.pointerId);
-    if (index !== -1) evCache.current[index] = e;
+    // Update Cache (Touch Only)
+    if (e.pointerType === 'touch') {
+        const index = evCache.current.findIndex(ev => ev.pointerId === e.pointerId);
+        if (index !== -1) evCache.current[index] = e;
+    }
 
-    // --- PINCH ZOOM & PAN LOGIC ---
-    if (evCache.current.length === 2) {
+    // PALM REJECTION CHECK
+    if (isPenActive.current && e.pointerType !== 'pen') return;
+
+    // --- PINCH ZOOM & PAN LOGIC (Only if Pen NOT active) ---
+    if (!isPenActive.current && evCache.current.length === 2) {
         const p1 = evCache.current[0];
         const p2 = evCache.current[1];
         
-        // Calculate current distance between points
         const curDist = Math.hypot(p1.clientX - p2.clientX, p1.clientY - p2.clientY);
-        
-        // Calculate center of pinch (in container coords)
         const cx = ((p1.clientX + p2.clientX) / 2) - rect.left;
         const cy = ((p1.clientY + p2.clientY) / 2) - rect.top;
 
         if (prevPinchDist.current > 0 && prevPinchCenter.current) {
             const distDelta = curDist / prevPinchDist.current;
-            
-            // IMPORTANT: Capture these values LOCALLY. 
-            // The ref (prevPinchCenter.current) might be nulled out by handlePointerUp
-            // before the React state update function runs below.
             const lastCenter = prevPinchCenter.current;
 
-            // Apply Transform
             setViewTransform(prev => {
                 const newScale = Math.max(0.1, Math.min(10, prev.scale * distDelta));
-
-                // Helper to get local coordinate relative to correct pane
                 const getLocalX = (screenX) => {
                    const halfWidth = rect.width / 2;
                    const isRight = screenX > halfWidth;
                    return screenX - (isRight ? halfWidth : 0);
                 };
-
-                // Use captured local variable 'lastCenter', NOT the ref
                 const oldLocalX = getLocalX(lastCenter.x);
                 const oldLocalY = lastCenter.y;
-                
                 const newLocalX = getLocalX(cx);
                 const newLocalY = cy;
-
-                // Formula: NewOffset = OldOffset + (OldLocal / OldScale) - (NewLocal / NewScale)
-                // This preserves the World Point under the pinch center
                 const newTx = prev.x + (oldLocalX / prev.scale) - (newLocalX / newScale);
                 const newTy = prev.y + (oldLocalY / prev.scale) - (newLocalY / newScale);
-                
                 return { scale: newScale, x: newTx, y: newTy };
             });
         }
-
         prevPinchDist.current = curDist;
         prevPinchCenter.current = { x: cx, y: cy };
         
-        // Cancel any drawing or single-finger drag that might have started
         if (currentPoints.length > 0) setCurrentPoints([]);
+        activeStrokePoints.current = []; 
         if (dragStartPos) setDragStartPos(null);
         return;
     }
@@ -350,24 +366,25 @@ export const useCanvasInput = ({
     else if (mode.startsWith('select') && e.buttons === 1) {
         setSelectionPath(prev => [...prev, { x: worldPos.x, y: worldPos.y }]);
     }
-    else if (mode === 'draw' && e.buttons === 1 && evCache.current.length === 1) {
-      // Coalesce events for higher precision (iPad/Wacom)
+    else if (mode === 'draw' && e.buttons === 1) {
       const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-      const newPoints = [];
+      
+      let pointsAdded = false;
 
       events.forEach(evt => {
+         // PALM REJECTION Inside Loop
+         if (isPenActive.current && evt.pointerType !== 'pen') return;
+
          const rect = containerRef.current.getBoundingClientRect();
          const wp = toWorld(evt.clientX - rect.left, evt.clientY - rect.top);
          
-         const lastP = newPoints.length > 0 
-             ? newPoints[newPoints.length - 1] 
-             : (currentPoints.length > 0 ? currentPoints[currentPoints.length - 1] : null);
+         const lastP = activeStrokePoints.current.length > 0 
+             ? activeStrokePoints.current[activeStrokePoints.current.length - 1] 
+             : null;
          
-         // 1. Min Distance Filter (Scale Independent)
-         // Use a small screen pixel threshold (e.g., 0.5px) converted to world units
-         const threshold = 0.5 / viewTransform.scale; 
-         
-         if (lastP && Math.hypot(wp.x - lastP.x, wp.y - lastP.y) < threshold) return; 
+         // LITERAL MODE: Removed minimum distance threshold.
+         // Only ignore EXACT duplicates to save memory.
+         if (lastP && lastP.x === wp.x && lastP.y === wp.y) return; 
 
          let p = evt.pointerType === 'pen' ? evt.pressure : 0.5;
          if (evt.pointerType === 'pen') {
@@ -375,11 +392,13 @@ export const useCanvasInput = ({
              lastPressureRef.current = p;
          }
 
-         newPoints.push({ x: wp.x, y: wp.y, pressure: p, pointerType: evt.pointerType });
+         const newPoint = { x: wp.x, y: wp.y, pressure: p, pointerType: evt.pointerType };
+         activeStrokePoints.current.push(newPoint);
+         pointsAdded = true;
       });
 
-      if (newPoints.length > 0) {
-         setCurrentPoints(prev => [...prev, ...newPoints]);
+      if (pointsAdded) {
+         setCurrentPoints([...activeStrokePoints.current]);
       }
       
       if (isEraser) {
@@ -445,20 +464,22 @@ export const useCanvasInput = ({
 
   // --- Pointer Up ---
   const handlePointerUp = (e) => {
-    // Safely release pointer capture
     try {
         if (e.target.hasPointerCapture && e.target.hasPointerCapture(e.pointerId)) {
             e.target.releasePointerCapture(e.pointerId);
         }
-    } catch(err) {
-        // Ignore errors if pointer was already released by the browser/system
+    } catch(err) { }
+    
+    // Clear Pen Active State on Up
+    if (e.pointerType === 'pen') {
+        isPenActive.current = false;
+    }
+
+    if (e.pointerType === 'touch') {
+        const index = evCache.current.findIndex(ev => ev.pointerId === e.pointerId);
+        if (index !== -1) evCache.current.splice(index, 1);
     }
     
-    // Remove from cache
-    const index = evCache.current.findIndex(ev => ev.pointerId === e.pointerId);
-    if (index !== -1) evCache.current.splice(index, 1);
-    
-    // Reset pinch state if fewer than 2 fingers
     if (evCache.current.length < 2) {
         prevPinchDist.current = -1;
         prevPinchCenter.current = null;
@@ -565,10 +586,23 @@ export const useCanvasInput = ({
         setSelectionPath([]);
     }
 
-    else if (mode === 'draw' && currentPoints.length > 0) {
-      const newStroke = { id: Date.now(), type: 'stroke', layerId: activeLayerId, points: currentPoints, color: brushColor, size: brushSize, opacity: brushOpacity, isEraser: isEraser };
-      setDrawingElements(prev => [...prev, newStroke]);
+    else if (mode === 'draw') {
+      if (activeStrokePoints.current.length > 0) {
+          const newStroke = { 
+              id: Date.now(), 
+              type: 'stroke', 
+              layerId: activeLayerId, 
+              points: [...activeStrokePoints.current], 
+              color: brushColor, 
+              size: brushSize, 
+              opacity: brushOpacity, 
+              isEraser: isEraser 
+          };
+          setDrawingElements(prev => [...prev, newStroke]);
+      }
+      
       setCurrentPoints([]);
+      activeStrokePoints.current = [];
     }
     else if (mode === 'line' && lineStartPoint) {
        const rect = containerRef.current.getBoundingClientRect();
