@@ -84,6 +84,17 @@ export const PortraitProvider = ({ children }) => {
     setViewTransform({ scale: 1, x: 0, y: 0 });
   };
 
+  const clearActiveLayer = () => {
+    setDrawingElements(prev => prev.filter(el => {
+      // Elements without a layerId effectively belong to 'layer1'
+      const elLayerId = el.layerId || 'layer1';
+      return elLayerId !== activeLayerId;
+    }));
+    // We do not clear selection here to avoid complex state management issues, 
+    // but typically you might want to deselect if selected items were on this layer.
+    // For simplicity, we just remove the elements.
+  };
+
   const switchMode = (newMode) => {
     setMode(newMode);
     setLineStartPoint(null);
@@ -142,6 +153,7 @@ export const PortraitProvider = ({ children }) => {
     activeSidePanel, setActiveSidePanel, togglePanel,
     showRefControls, setShowRefControls,
     handleResetAll,
+    clearActiveLayer,
 
     // Refs Images
     imageSrc1, setImageSrc1, opacity1, setOpacity1, grayscale1, setGrayscale1,

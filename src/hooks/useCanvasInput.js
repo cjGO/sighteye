@@ -363,7 +363,11 @@ export const useCanvasInput = ({
              ? newPoints[newPoints.length - 1] 
              : (currentPoints.length > 0 ? currentPoints[currentPoints.length - 1] : null);
          
-         if (lastP && Math.hypot(wp.x - lastP.x, wp.y - lastP.y) < 0.5) return; 
+         // 1. Min Distance Filter (Scale Independent)
+         // Use a small screen pixel threshold (e.g., 0.5px) converted to world units
+         const threshold = 0.5 / viewTransform.scale; 
+         
+         if (lastP && Math.hypot(wp.x - lastP.x, wp.y - lastP.y) < threshold) return; 
 
          let p = evt.pointerType === 'pen' ? evt.pressure : 0.5;
          if (evt.pointerType === 'pen') {

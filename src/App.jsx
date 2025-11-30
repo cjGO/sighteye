@@ -35,8 +35,7 @@ const PortraitContent = () => {
   const drawingSnapshotRef = useRef(null); 
   const measurementSnapshotRef = useRef(null);
   const lastAdjustPos = useRef(null);
-
-  
+  const kTimerRef = useRef(null);
 
   // --- Consume Context ---
   const ctx = usePortrait();
@@ -58,7 +57,7 @@ const PortraitContent = () => {
     imageSrc1, setImageSrc1, opacity1, setOpacity1, grayscale1, setGrayscale1,
     imageSrc2, setImageSrc2, opacity2, setOpacity2, grayscale2, setGrayscale2,
     activeSidePanel, setActiveSidePanel, showRefControls,
-    handleResetAll,
+    handleResetAll, clearActiveLayer,
     unitTypes, setUnitTypes, activeUnitId, setActiveUnitId,
     measurementsOpacity, setMeasurementsOpacity, isCreatingUnit, setIsCreatingUnit, tempUnitStart, setTempUnitStart,
     bgColor, setBgColor
@@ -122,11 +121,6 @@ const PortraitContent = () => {
         const vy = viewTransform.y;
         const s = viewTransform.scale;
         
-        // Calculate Transform Matrix [a, b, c, d, e, f] for setTransform
-        // This ensures the tempCtx renders vector elements at the correct screen resolution and position
-        // Left: x_screen = (x_world - vx) * s  =>  s*x_world + (-s*vx)
-        // Right: x_screen = s*(x_world - (hw + vx)) + hw  =>  s*x_world + (hw - s*hw - s*vx)
-        
         let a = s, b = 0, c = 0, d = s;
         let e_x = isRight ? (halfWidth - s * (halfWidth + vx)) : (-vx * s);
         let f_y = -vy * s;
@@ -144,14 +138,11 @@ const PortraitContent = () => {
             if (layerElements.length === 0 && layer.id !== activeLayerId) return;
 
             if (tempCtx) {
-                // 1. Reset Temp Context
                 tempCtx.setTransform(1, 0, 0, 1, 0, 0);
                 tempCtx.clearRect(0, 0, width, height);
-                // 2. Apply View Transform to Temp Context
                 tempCtx.setTransform(a, b, c, d, e_x, f_y);
             }
             
-            // 3. Draw Elements (in World Coords, projected by setTransform)
             layerElements.forEach(el => { if (tempCtx) drawElement(tempCtx, el); });
 
             if (layer.id === activeLayerId && mode === 'draw' && currentPoints.length > 0) {
@@ -159,7 +150,6 @@ const PortraitContent = () => {
             }
 
             if (tempCtx) {
-                // 4. Draw the rendered pixels to screen (Identity transform on destination, as temp is already projected)
                 canvasCtx.globalAlpha = layer.opacity;
                 canvasCtx.drawImage(tempCanvasRef.current, 0, 0);
             }
@@ -167,8 +157,8 @@ const PortraitContent = () => {
         canvasCtx.restore();
     };
 
-    renderPane(false); // Left
-    renderPane(true);  // Right
+    renderPane(false);
+    renderPane(true);
   };
 
   const { isPlaying, isRecording, recordingProgress, videoFormat, setVideoFormat, showVideoMenu, setShowVideoMenu, togglePlayback, handleExportVideo } = useRecorder();
@@ -186,7 +176,6 @@ const handleSave = () => {
     exportCanvas.height = height;
     const expCtx = exportCanvas.getContext('2d');
     
-    // 1. Fill Background
     expCtx.fillStyle = bgColor;
     expCtx.fillRect(0, 0, paneWidth, height);
 
@@ -194,7 +183,6 @@ const handleSave = () => {
     img.crossOrigin = "anonymous"; 
     img.src = imageSrc2;
     img.onload = () => {
-        // 2. Draw Reference Image
         expCtx.save();
         if (grayscale2) expCtx.filter = 'grayscale(100%)';
         expCtx.globalAlpha = opacity2;
@@ -211,7 +199,6 @@ const handleSave = () => {
         expCtx.drawImage(img, offsetX, offsetY, drawW, drawH);
         expCtx.restore();
 
-        // 3. Draw Layers
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = paneWidth;
         tempCanvas.height = height;
@@ -224,22 +211,18 @@ const handleSave = () => {
             if (!layer.visible) return;
             const layerEls = drawingElements.filter(el => el.layerId === layer.id || (!el.layerId && layer.id === 'layer1'));
             
-            // Clear and Transform Temp Canvas
             tempCtx.setTransform(1, 0, 0, 1, 0, 0);
             tempCtx.clearRect(0, 0, paneWidth, height);
-            tempCtx.setTransform(scale, 0, 0, scale, targetX, targetY); // Apply view transform
+            tempCtx.setTransform(scale, 0, 0, scale, targetX, targetY);
 
-            // Draw elements
             layerEls.forEach(el => drawElement(tempCtx, el));
             
-            // Composite
             expCtx.save();
             expCtx.globalAlpha = layer.opacity;
             expCtx.drawImage(tempCanvas, 0, 0);
             expCtx.restore();
         });
 
-        // 4. Draw Units (Directly to export context with transform)
         expCtx.save();
         expCtx.scale(scale, scale);
         expCtx.translate(-(paneWidth + viewTransform.x), -viewTransform.y);
@@ -259,8 +242,8 @@ const handleSave = () => {
           }
         });
         
-        expCtx.restore(); // Restore transform
-        expCtx.restore(); // Restore clip
+        expCtx.restore(); 
+        expCtx.restore(); 
         
         const link = document.createElement('a');
         link.download = 'portrait-study.png';
@@ -290,35 +273,28 @@ const handleSave = () => {
 
   useEffect(() => { if (isPlaying) return; redrawCanvas(); }, [drawingElements, viewTransform, currentPoints, mode, brushSize, brushColor, brushOpacity, isEraser, isPlaying, usePressure, bgColor, layers, activeLayerId]);
 
-// --- PASTE SUPPORT ---
   useEffect(() => {
     const handlePaste = (e) => {
       const items = e.clipboardData?.items;
       if (!items) return;
 
       for (let i = 0; i < items.length; i++) {
-        // Check for image type
         if (items[i].type.indexOf('image') !== -1) {
           const blob = items[i].getAsFile();
           const reader = new FileReader();
           
           reader.onload = (event) => {
-            // Determine which pane the mouse is hovering over
             if (containerRef.current) {
               const { width } = containerRef.current.getBoundingClientRect();
               const isLeftPane = mousePosRef.current.x < width / 2;
-
-              if (isLeftPane) {
-                setImageSrc1(event.target.result);
-              } else {
-                setImageSrc2(event.target.result);
-              }
+              if (isLeftPane) setImageSrc1(event.target.result);
+              else setImageSrc2(event.target.result);
             }
           };
           
           reader.readAsDataURL(blob);
-          e.preventDefault(); // Prevent default browser paste
-          break; // Stop after finding the first image
+          e.preventDefault();
+          break;
         }
       }
     };
@@ -344,9 +320,27 @@ const handleSave = () => {
       else if (key === 'f') { setOpacity2(prev => (prev > 0 ? 0 : 0.5)); } 
       else if (key === 'g') { setGridLevel(prev => (prev + 1) % 4); } 
       else if (key === 't') { restoreHistory(); } 
-      else if (key === 'k') { handleResetAll(); }
+      else if (key === 'k') { 
+          if (!e.repeat && !kTimerRef.current) {
+              kTimerRef.current = setTimeout(() => {
+                  handleResetAll();
+                  kTimerRef.current = null;
+              }, 2000);
+          }
+      }
     };
-    const handleKeyUp = (e) => { if (e.key === 'Shift') setIsShiftDown(false); };
+    const handleKeyUp = (e) => { 
+        if (e.key === 'Shift') setIsShiftDown(false); 
+        if (e.key.toLowerCase() === 'k') {
+            if (kTimerRef.current) {
+                // Timer was still running, so this is a short press
+                clearTimeout(kTimerRef.current);
+                kTimerRef.current = null;
+                clearActiveLayer();
+            }
+            // If timer is null, it means it already fired (Long press), so we do nothing here
+        }
+    };
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     return () => { window.removeEventListener('keydown', handleKeyDown); window.removeEventListener('keyup', handleKeyUp); };
